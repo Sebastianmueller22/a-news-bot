@@ -27,7 +27,6 @@ em['To'] = emailRecipient
 em['Subject'] = subject
 
 client = OpenAI(
-    # This is the default and can be omitted
     api_key= "reference-to-your-api-key-here (ideally, not hardcoded)"
 )
 
