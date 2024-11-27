@@ -14,7 +14,6 @@ Dependencies:
 openai
 bs4
 re
-urllib
 
 This needs to be added to the lambda as a layer. For how to add layers, you can follow these steps:
 
