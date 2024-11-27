@@ -1,0 +1,215 @@
+import json
+import os
+import re
+from datetime import datetime, timedelta, date
+from urllib.request import Request, urlopen
+from openai import OpenAI
+from urllib.error import HTTPError, URLError
+
+from botocore.vendored import requests
+from bs4 import BeautifulSoup
+from dateutil.parser import parse
+from email.message import EmailMessage
+import smtplib
+import ssl
+
+url = 'https://www.tagesschau.de'
+
+gPw = 'your gmail app password here. Ideally, not hardcoded.'
+
+emailSender = 'your-sender-email (gmail works well)'
+emailRecipient = 'your recipient'
+subject = 'Awesome News Summary'
+
+em = EmailMessage()
+em['From'] = emailSender
+em['To'] = emailRecipient
+em['Subject'] = subject
+
+client = OpenAI(
+    # This is the default and can be omitted
+    api_key= "reference-to-your-api-key-here (ideally, not hardcoded)"
+)
+
+def makeUrlJudging(urlSoup):
+    return client.chat.completions.create(
+    messages= [
+        {
+            "role": "system",
+            "content" : """# IDENTITY and PURPOSE
+        You are an ultra-wise and brilliant classifier and judge of news. You get an input of titles, headlines, first sentences, tags etc. and you decide wether this news is relevant or not.
+
+        Take a deep breath and think step by step about how to perform the following to get the best outcome. You have a lot of freedom to do this the way you think is best.
+
+        # Considerations:
+
+        - Judge the incoming news titles by topic. They should be in one of the topics of interest to be judged as interesting and worth reading.
+        - Topics of interest are: Diplomatic relations between nation states, geopolitics, wars, climate change, renewable energy, cybersecurity, economic reports, laws being passed, upcoming elections, election results no matter if foreign or domestic
+        - Generally prefer articles that lead to a high level overview rather than small individual events that have no relevance for broader trends. I want to get the big picture, but individual, small scale catastrophes with no broader significance are of no interest to me.
+        - Never include news that falls in one of these topics: Car, plane or train crashes, weather other than climate change news, sports news, stock market movements like DAX fluctuations
+        - You only output the url of the corresponding news article. If several articles are deemed interesting, make a comma after the each url, a new line and append the next url to the article as the output.
+        - Individual news items will end in a Line prefixed by Link: the url there is your output for an interesting article. Obove the Link: line will be the input to be judged by you.
+        - Never include news about DAX movements.
+
+        ## Examples:
+
+        Example of a piece of news that does interest me, because it gives insight in geopolitical considerations:
+
+        Russische Geheimdossiers
+        Scholz ist noch der Beste der Bösen
+        Vertrauliche Dokumente eines russischen Thinktanks geben einen Einblick, wie man in der Elite auf die Politik in Deutschland blickt. Nahezu überall entdeckt man mögliche Bündnispartner - außer bei den Grünen. Von G. Heil und M. Pohl.
+        mehr
+        Link: /investigativ/kontraste/russland-geheimdossier-deutschland-100.html
+
+        Your output for this example article should be /investigativ/kontraste/russland-geheimdossier-deutschland-100.html
+
+        Any further interesting news pieces should be appended in new lines. The result is a list of urls, each linking to an interesting article.
+
+        An example of uninteresting news:
+
+        Wettervorhersage Deutschland
+        Am Mittwoch im Süden dichte Wolken und gebietsweise Regen, sonst teils sonniges, teils neblig-trübes Herbstwetter. 10 bis 17°C.
+        mehr
+        Link: /wetter/deutschland/wettervorhersage-deutschland-100.html
+
+        This is a weather report and not a climate change related analysis. I want to read news that furthers my understanding of the world. Single events that have no broader influence are not of real interest to me. 
+
+        ## OUTPUT INSTRUCTIONS
+
+        Only output the urls after "Link: " in articles that you deem to be interesting according to the above intstructions.
+
+        Do not alter these links in any way and do not make them up. If they are not included in the input, do not include them in your output. 
+        Before handing in the output, double check the input against your output to make sure the link exists in the input. This is very important.
+        If an output link was not included in the input do not output it. Do not output before having completed this step.
+
+        Output them in an unlabled list with a comma after each link like so:
+
+        url1,
+        url2,
+        url3,
+        etc.
+
+        Output nothing else."""
+                },
+                {
+                    "role": "user",
+                    "content": urlSoup,
+                }
+            ],
+            model= "gpt-3.5-turbo-1106"
+        )
+
+def parse_urls(input_string):
+    # Step 1: Split the input string by commas to get individual URL strings
+    url_list = input_string.split(',')
+    # Step 2: Strip any leading or trailing whitespace characters from each URL
+    url_list = [url.strip() for url in url_list]
+    # Step 3: Remove any empty strings that may result from trailing commas
+    url_list = [url for url in url_list if url]
+    return url_list
+
+def summarizeText(singleText):
+    return client.chat.completions.create(
+    messages= [
+            {
+                "role": "system",
+                "content" : """
+                IDENTITÄT und Zweck:
+
+                Sie sind ein Experte im Zusammenfassen von Nachrichtenartikeln. Sie nehmen Artikel als Eingabe entgegen und geben Zusammenfassungen in Markdown aus.
+
+                Nehmen sie einen tiefen Atemzug und denke Schritt für Schritt, wie sie dieses Ziel am Besten erreichen können.
+                
+                Ausgabe Sektion:
+
+                Versuchen sie die Hauptaussagen des Artikels wiederzugeben. Was ist passiert? Vor welchem Hintergrund passiert es? Was könnte das für zukünftige Ereignisse bedeuten?
+                Das sind einige Gute Fragen, die sie bei ihrer Zusammenfassung leiten können. 
+
+                Ausgabe Instruktionen:
+
+                Geben sie der Zusammenfassung einen Titel, dann lassen sie eine Leerzeile und fassen den Artikel in einem Paragraph von nicht mehr als 8 Sätzen zusammen. Fassen sie sich kurz, ohne wichtige Informationen auszulassen. 
+
+                Ein Beispiel für einen guten Output (darf nicht Teil ihres outputs sein!):
+
+                Beispiel Beginn
+
+                Geleaktes Geheimdosier eines Russischen Thinktanks
+
+                Ein geleaktes Dokument eines russischen Thinktanks zeigt auf, dass großes Interesse in Russland besteht, die politische Situation in Deutschland zu beeinflussen. In allen Parteien werden potenzielle Partner ausgemacht, nur bei den Grünen sieht man keine Chance der Annährung. 
+                Die guten Wahlergebnisse der AFD und des BSWs werden positiv gesehen, auch wenn vor einem Machtausbau des Politikers Höcke innerhalb der AFD gewarnt wird.
+                Die aus Sicht Russland gute Zusammenarbeit mit der AFD könnte dadurch in Gefahr geraten. 
+                Kanzler Scholz wird nicht als Freund ausgemacht, aber seine Zurückhaltung beim Thema Lieferung von Langstreckenwaffen an die Ukraine wird lobend erwähnt.
+
+                Beispiel Ende
+
+                Bitte nennen sie NIE die Quelle des Artikels in der Ausgabe, diese ist den Lesern bekannt.
+
+                Eingabe:
+                """
+            },
+            {
+                "role": "user",
+                "content": singleText,
+            }
+        ],
+        model= "gpt-3.5-turbo-1106"
+    )
+
+
+
+def download_html(zeUrl):
+    print(zeUrl)
+    request = Request(zeUrl)
+    try:
+        response = urlopen(request)
+        return response.read()
+    except HTTPError as e:
+        if e.code == 404:
+            print(f"Error 404: {zeUrl} not found.")
+        else:
+            print(f"HTTP Error: {e.code} for {zeUrl}")
+    except URLError as e:
+        print(f"URL Error: {e.reason} for {zeUrl}")
+    return ""
+
+
+
+def for_urls_get_full_text_and_summarize(urlsArray):
+    resultSummaries = ""
+    for theUrl in urlsArray:
+        if theUrl.startswith("/"):
+            htmlDocFull = download_html(url + theUrl)
+        else:
+            htmlDocFull = download_html(url + "/" + theUrl)
+        singleSoup = BeautifulSoup(htmlDocFull, "html.parser")
+        singleText = singleSoup.text
+        rawSummary = summarizeText(singleText)
+        resultSummaries += rawSummary.choices[0].message.content
+        resultSummaries += "\n\n"
+        
+    return resultSummaries
+
+
+def send_email(content):
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as mysmtp:
+        em.set_content(content)
+        mysmtp.login(emailSender, gPw)
+        mysmtp.sendmail(emailSender, emailRecipient, em.as_string())
+
+
+
+def lambda_handler(event, context):
+    html_doc = download_html(url)
+    soup = BeautifulSoup(html_doc, 'html.parser')
+    mysoup = soup.find_all( class_ = "teaser__link" )
+    resultString= ""
+    for tag in mysoup:
+        resultString += "\n"
+        resultString = resultString + tag.text + " \n \n Link: " + tag.get("href")
+    result = makeUrlJudging(resultString)
+    urlJudgingUnparsed = result.choices[0].message.content
+    urlsArray = parse_urls(urlJudgingUnparsed)
+    summaries = for_urls_get_full_text_and_summarize(urlsArray)
+    send_email(summaries)
+    return json.dumps(urlsArray)
